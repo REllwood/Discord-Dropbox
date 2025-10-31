@@ -1,0 +1,30 @@
+{
+  "name": "discord-image-storage",
+  "version": "1.0.0",
+  "description": "Educational library demonstrating Discord API for image storage - NOT for production use",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "test": "node test.js",
+    "example": "node examples/basic-usage.js",
+    "advanced": "node examples/advanced-usage.js"
+  },
+  "keywords": [
+    "discord",
+    "storage",
+    "images",
+    "educational",
+    "learning"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.3.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+
