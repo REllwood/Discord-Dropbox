@@ -1,6 +1,6 @@
-import { RateLimiter } from './RateLimiter.js';
+import { Logger, RateLimiter } from './RateLimiter.js';
 
-export { RateLimiter };
+export { Logger, RateLimiter };
 
 /**
  * Options for the optional client-side rate limiter
@@ -28,6 +28,8 @@ export interface DiscordStorageConfig {
    * limit between several instances.
    */
   rateLimit?: RateLimitOptions | RateLimiter;
+  /** Where status messages go (default: console). Pass null to stay silent. */
+  logger?: Logger | null;
 }
 
 /**

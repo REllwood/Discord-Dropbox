@@ -40,8 +40,10 @@ export class DiscordStorage {
    * @param {number} [config.downloadTimeoutMs=60000] - Abort downloads that take longer than this
    * @param {Object|RateLimiter} [config.rateLimit] - Optional extra throttling of Discord API
    *   requests: `{ maxRequests, windowMs }`, or a RateLimiter to share between instances
+   * @param {Object|null} [config.logger=console] - Where status messages go: any object with
+   *   info() and error() methods, or null to stay silent
    */
-  constructor(config) {
+  constructor(config = {}) {
     if (!config.token) {
       throw new Error('Discord bot token is required');
     }
@@ -49,8 +51,10 @@ export class DiscordStorage {
       throw new Error('Discord channel ID is required');
     }
 
-    this.token = config.token;
+    // Non-enumerable so the token doesn't show up in console.log or JSON output
+    Object.defineProperty(this, 'token', { value: config.token, writable: true });
     this.channelId = config.channelId;
+    this.logger = config.logger === undefined ? console : config.logger || null;
     this.downloadTimeoutMs = config.downloadTimeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS;
     if (!Number.isFinite(this.downloadTimeoutMs) || this.downloadTimeoutMs <= 0) {
       throw new RangeError('downloadTimeoutMs must be a positive number');
@@ -59,10 +63,13 @@ export class DiscordStorage {
     if (config.rateLimit instanceof RateLimiter) {
       this.rateLimiter = config.rateLimit;
     } else if (config.rateLimit) {
-      this.rateLimiter = new RateLimiter(config.rateLimit.maxRequests, config.rateLimit.windowMs);
+      this.rateLimiter = new RateLimiter(config.rateLimit.maxRequests, config.rateLimit.windowMs, {
+        logger: this.logger,
+      });
     } else {
       this.rateLimiter = null;
     }
+
     this.client = null;
     this.isReady = false;
     this.readyPromise = null;
@@ -117,7 +124,7 @@ export class DiscordStorage {
     // Keep a permanent listener so client errors after login are logged
     // instead of crashing the process as unhandled 'error' events
     client.on(Events.Error, (error) => {
-      console.error('❌ Discord client error:', error);
+      this.logger?.error('❌ Discord client error:', error);
     });
 
     try {
@@ -158,7 +165,7 @@ export class DiscordStorage {
     }
 
     this.isReady = true;
-    console.log(`✅ Connected as ${client.user.tag}`);
+    this.logger?.info(`✅ Connected as ${client.user.tag}`);
   }
 
   /**
@@ -464,7 +471,7 @@ export class DiscordStorage {
     }
 
     await client.destroy();
-    console.log('✅ Disconnected from Discord');
+    this.logger?.info('✅ Disconnected from Discord');
   }
 }
 

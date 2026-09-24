@@ -138,7 +138,7 @@ export class FakeClient extends EventEmitter {
  * `clientOptions` may be a function of the attempt number (0, 1, ...).
  */
 export function createTestStorage(t, { clientOptions = {}, channels, config = {} } = {}) {
-  t.mock.method(console, 'log', () => {});
+  t.mock.method(console, 'info', () => {});
   t.mock.method(console, 'error', () => {});
 
   const channel = new FakeChannel('channel-1');

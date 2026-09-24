@@ -4,7 +4,13 @@
  * want to stay well below them.
  */
 export class RateLimiter {
-  constructor(maxRequests = 5, windowMs = 1000) {
+  /**
+   * @param {number} [maxRequests=5] - Requests allowed per window
+   * @param {number} [windowMs=1000] - Window length in milliseconds
+   * @param {Object} [options]
+   * @param {Object|null} [options.logger=console] - Where to report waits, or null for silence
+   */
+  constructor(maxRequests = 5, windowMs = 1000, { logger = console } = {}) {
     if (!Number.isInteger(maxRequests) || maxRequests < 1) {
       throw new RangeError('maxRequests must be a positive whole number');
     }
@@ -14,6 +20,7 @@ export class RateLimiter {
 
     this.maxRequests = maxRequests;
     this.windowMs = windowMs;
+    this.logger = logger || null;
     this.requests = [];
     this._queue = Promise.resolve();
   }
@@ -34,10 +41,15 @@ export class RateLimiter {
   async _takeSlot() {
     this._prune(Date.now());
 
+    let reported = false;
     while (this.requests.length >= this.maxRequests) {
       const waitTime = this.windowMs - (Date.now() - this.requests[0]);
       if (waitTime > 0) {
-        console.log(`⏳ Rate limit reached. Waiting ${waitTime}ms...`);
+        // Timers can wake a millisecond early, so only report the first wait
+        if (!reported) {
+          this.logger?.info(`⏳ Rate limit reached. Waiting ${waitTime}ms...`);
+          reported = true;
+        }
         await this._sleep(waitTime);
       }
       this._prune(Date.now());
