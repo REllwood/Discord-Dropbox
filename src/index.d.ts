@@ -115,7 +115,8 @@ export class DiscordStorage {
   constructor(config: DiscordStorageConfig);
 
   /**
-   * Initialize the Discord client and connect
+   * Initialise the Discord client and connect.
+   * Concurrent calls share one login; a failed login can be retried.
    */
   connect(): Promise<void>;
 
@@ -160,7 +161,8 @@ export class DiscordStorage {
   delete(messageId: string): Promise<DeleteResult>;
 
   /**
-   * Disconnect from Discord
+   * Disconnect from Discord. Rejects any pending connect(); the instance
+   * can connect again afterwards.
    */
   disconnect(): Promise<void>;
 }

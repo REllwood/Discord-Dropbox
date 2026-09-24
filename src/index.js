@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, AttachmentBuilder } from 'discord.js';
+import { Client, Events, GatewayIntentBits, AttachmentBuilder } from 'discord.js';
 import { createReadStream, writeFileSync } from 'fs';
 import { basename } from 'path';
 import https from 'https';
@@ -27,10 +27,13 @@ export class DiscordStorage {
     this.client = null;
     this.isReady = false;
     this.readyPromise = null;
+    this._abortConnect = null;
   }
 
   /**
-   * Initialise the Discord client and connect
+   * Initialise the Discord client and connect.
+   * Concurrent calls share one login attempt. A failed attempt is not cached,
+   * so calling connect() again retries with a fresh client.
    * @returns {Promise<void>}
    */
   async connect() {
@@ -38,33 +41,85 @@ export class DiscordStorage {
       return;
     }
 
-    if (this.readyPromise) {
-      return this.readyPromise;
+    if (!this.readyPromise) {
+      const attempt = this._login().catch((error) => {
+        if (this.readyPromise === attempt) {
+          this.readyPromise = null;
+        }
+        throw error;
+      });
+      this.readyPromise = attempt;
     }
 
-    this.readyPromise = new Promise((resolve, reject) => {
-      this.client = new Client({
-        intents: [
-          GatewayIntentBits.Guilds,
-          GatewayIntentBits.GuildMessages,
-        ],
-      });
+    return this.readyPromise;
+  }
 
-      this.client.once('ready', () => {
-        console.log(`✅ Connected as ${this.client.user.tag}`);
-        this.isReady = true;
-        resolve();
-      });
+  /**
+   * Create the underlying discord.js client
+   * @private
+   */
+  _createClient() {
+    return new Client({
+      intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+      ],
+    });
+  }
 
-      this.client.once('error', (error) => {
-        console.error('❌ Discord client error:', error);
-        reject(error);
-      });
+  /**
+   * Log in with a new client and wait for it to become ready
+   * @private
+   */
+  async _login() {
+    const client = this._createClient();
+    this.client = client;
 
-      this.client.login(this.token).catch(reject);
+    // Keep a permanent listener so client errors after login are logged
+    // instead of crashing the process as unhandled 'error' events
+    client.on(Events.Error, (error) => {
+      console.error('❌ Discord client error:', error);
     });
 
-    return this.readyPromise;
+    try {
+      await new Promise((resolve, reject) => {
+        let settled = false;
+        const settle = (callback) => (value) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          client.off(Events.ClientReady, onReady);
+          client.off(Events.Error, onError);
+          if (this._abortConnect === onError) {
+            this._abortConnect = null;
+          }
+          callback(value);
+        };
+        const onReady = settle(resolve);
+        const onError = settle(reject);
+
+        client.once(Events.ClientReady, onReady);
+        client.once(Events.Error, onError);
+        this._abortConnect = onError;
+
+        client.login(this.token).catch(onError);
+      });
+
+      if (this.client !== client) {
+        throw new Error('Disconnected before the connection was ready');
+      }
+    } catch (error) {
+      // If disconnect() already took this client, it destroys it as well
+      if (this.client === client) {
+        this.client = null;
+        await Promise.resolve(client.destroy()).catch(() => {});
+      }
+      throw error;
+    }
+
+    this.isReady = true;
+    console.log(`✅ Connected as ${client.user.tag}`);
   }
 
   /**
@@ -280,16 +335,27 @@ export class DiscordStorage {
   }
 
   /**
-   * Disconnect from Discord
+   * Disconnect from Discord. Safe to call at any time, including while a
+   * connection is still being established (the pending connect() rejects).
+   * The instance can connect again afterwards.
    * @returns {Promise<void>}
    */
   async disconnect() {
-    if (this.client && this.isReady) {
-      await this.client.destroy();
-      this.isReady = false;
-      this.client = null;
-      console.log('✅ Disconnected from Discord');
+    const client = this.client;
+    if (!client) {
+      return;
     }
+
+    // Reset state before awaiting so a concurrent connect() starts cleanly
+    this.client = null;
+    this.isReady = false;
+    this.readyPromise = null;
+    if (this._abortConnect) {
+      this._abortConnect(new Error('Disconnected before the connection was ready'));
+    }
+
+    await client.destroy();
+    console.log('✅ Disconnected from Discord');
   }
 }
 
