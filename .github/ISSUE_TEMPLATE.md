@@ -3,7 +3,7 @@
 Please confirm:
 
 - [ ] I have read the README.md
-- [ ] I have read the SETUP.md guide
+- [ ] I have followed the Quick Start section of the README
 - [ ] I understand this project is for educational purposes only
 - [ ] I understand this violates Discord's Terms of Service
 - [ ] I am not asking for help with production deployment

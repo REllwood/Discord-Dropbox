@@ -3,5 +3,6 @@ node_modules/
 test-images/
 test-downloads/
 downloaded-images/
-.env.example
+gallery.json
+*.part
 
