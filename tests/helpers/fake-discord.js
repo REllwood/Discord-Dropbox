@@ -156,3 +156,19 @@ export function createTestStorage(t, { clientOptions = {}, channels, config = {}
 
   return { storage, channel, clients };
 }
+
+/**
+ * Serve a fake channel's attachments through a mocked global fetch
+ */
+export function mockCdn(t, channel) {
+  return t.mock.method(globalThis, 'fetch', async (url) => {
+    for (const message of channel.store.values()) {
+      for (const attachment of message.attachments.values()) {
+        if (attachment.url === url) {
+          return new Response(attachment.data);
+        }
+      }
+    }
+    return new Response('Not Found', { status: 404 });
+  });
+}
