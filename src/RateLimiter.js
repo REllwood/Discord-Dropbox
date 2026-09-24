@@ -41,10 +41,15 @@ export class RateLimiter {
   async _takeSlot() {
     this._prune(Date.now());
 
+    let reported = false;
     while (this.requests.length >= this.maxRequests) {
       const waitTime = this.windowMs - (Date.now() - this.requests[0]);
       if (waitTime > 0) {
-        this.logger?.info(`⏳ Rate limit reached. Waiting ${waitTime}ms...`);
+        // Timers can wake a millisecond early, so only report the first wait
+        if (!reported) {
+          this.logger?.info(`⏳ Rate limit reached. Waiting ${waitTime}ms...`);
+          reported = true;
+        }
         await this._sleep(waitTime);
       }
       this._prune(Date.now());
