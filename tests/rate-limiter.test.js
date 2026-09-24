@@ -15,7 +15,7 @@ async function releaseTimes(limiter, count) {
 }
 
 test('concurrent callers cannot overshoot the limit', async (t) => {
-  t.mock.method(console, 'log', () => {});
+  t.mock.method(console, 'info', () => {});
   const limiter = new RateLimiter(2, 100);
 
   const times = await releaseTimes(limiter, 6);
@@ -38,7 +38,7 @@ test('requests under the limit are not delayed', async () => {
 });
 
 test('reset() clears the window', async (t) => {
-  t.mock.method(console, 'log', () => {});
+  t.mock.method(console, 'info', () => {});
   const limiter = new RateLimiter(1, 10_000);
   await limiter.waitIfNeeded();
 
