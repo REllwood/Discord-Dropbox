@@ -1,15 +1,18 @@
 import { Client, Events, GatewayIntentBits, AttachmentBuilder } from 'discord.js';
-import { writeFileSync } from 'fs';
-import { readFile } from 'fs/promises';
+import { createWriteStream } from 'fs';
+import { readFile, rename, rm } from 'fs/promises';
 import { basename } from 'path';
-import https from 'https';
-import http from 'http';
+import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 
 /** Discord's limit on message content, which holds the description */
 const MAX_DESCRIPTION_LENGTH = 2000;
 
 /** Discord API error code for a file over the server's upload limit */
 const FILE_TOO_LARGE = 40005;
+
+/** Default time allowed for a whole download before it is aborted */
+const DEFAULT_DOWNLOAD_TIMEOUT_MS = 60_000;
 
 /**
  * Throw unless messageId looks like a Discord snowflake.
@@ -31,6 +34,7 @@ export class DiscordStorage {
    * @param {Object} config - Configuration object
    * @param {string} config.token - Discord bot token
    * @param {string} config.channelId - Discord channel ID for storage
+   * @param {number} [config.downloadTimeoutMs=60000] - Abort downloads that take longer than this
    */
   constructor(config) {
     if (!config.token) {
@@ -42,6 +46,10 @@ export class DiscordStorage {
 
     this.token = config.token;
     this.channelId = config.channelId;
+    this.downloadTimeoutMs = config.downloadTimeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS;
+    if (!Number.isFinite(this.downloadTimeoutMs) || this.downloadTimeoutMs <= 0) {
+      throw new RangeError('downloadTimeoutMs must be a positive number');
+    }
     this.client = null;
     this.isReady = false;
     this.readyPromise = null;
@@ -223,9 +231,7 @@ export class DiscordStorage {
       }
 
       const attachment = message.attachments.first();
-      const fileData = await this._downloadFile(attachment.url);
-
-      writeFileSync(outputPath, fileData);
+      await this._downloadFile(attachment.url, outputPath);
 
       return {
         success: true,
@@ -271,18 +277,38 @@ export class DiscordStorage {
   }
 
   /**
-   * List recent uploads from the channel
-   * @param {number} limit - Maximum number of messages to fetch (default: 10, max: 100)
-   * @returns {Promise<Array>} Array of image metadata
+   * List recent uploads made by this bot, newest first.
+   * Pages back through the channel history until `limit` uploads are found
+   * or the history runs out. Messages from other users are skipped.
+   * @param {number} limit - Maximum number of uploads to return (default: 10)
+   * @returns {Promise<Array>} Array of upload metadata
    */
   async listUploads(limit = 10) {
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw new RangeError('limit must be a positive whole number');
+    }
+
     try {
       const channel = await this._getChannel();
-      const messages = await channel.messages.fetch({ limit: Math.min(limit, 100) });
+      const botId = this.client?.user?.id;
+      if (!botId) {
+        throw new Error('Disconnected from Discord');
+      }
 
       const uploads = [];
-      messages.forEach((message) => {
-        if (message.attachments.size > 0) {
+      let before;
+
+      while (uploads.length < limit) {
+        const page = await channel.messages.fetch({ limit: 100, before });
+        if (page.size === 0) {
+          break;
+        }
+
+        for (const message of page.values()) {
+          if (message.author.id !== botId || message.attachments.size === 0) {
+            continue;
+          }
+
           const attachment = message.attachments.first();
           uploads.push({
             messageId: message.id,
@@ -292,8 +318,15 @@ export class DiscordStorage {
             description: message.content,
             uploadedAt: message.createdAt,
           });
+
+          if (uploads.length === limit) {
+            break;
+          }
         }
-      });
+
+        // Pages come newest first, so the last key is the oldest message
+        before = page.lastKey();
+      }
 
       return uploads;
     } catch (error) {
@@ -357,25 +390,28 @@ export class DiscordStorage {
   }
 
   /**
-   * Helper method to download file from URL
+   * Stream a file from a URL to disk. Writes to a temporary ".part" file and
+   * renames it on success, so a failed download never leaves a partial file.
    * @private
    */
-  _downloadFile(url) {
-    return new Promise((resolve, reject) => {
-      const protocol = url.startsWith('https') ? https : http;
-      
-      protocol.get(url, (response) => {
-        if (response.statusCode !== 200) {
-          reject(new Error(`Failed to download: ${response.statusCode}`));
-          return;
-        }
-
-        const chunks = [];
-        response.on('data', (chunk) => chunks.push(chunk));
-        response.on('end', () => resolve(Buffer.concat(chunks)));
-        response.on('error', reject);
-      }).on('error', reject);
+  async _downloadFile(url, outputPath) {
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(this.downloadTimeoutMs),
     });
+
+    if (!response.ok || !response.body) {
+      await response.body?.cancel();
+      throw new Error(`Failed to download: HTTP ${response.status}`);
+    }
+
+    const partialPath = `${outputPath}.part`;
+    try {
+      await pipeline(Readable.fromWeb(response.body), createWriteStream(partialPath));
+      await rename(partialPath, outputPath);
+    } catch (error) {
+      await rm(partialPath, { force: true });
+      throw error;
+    }
   }
 
   /**

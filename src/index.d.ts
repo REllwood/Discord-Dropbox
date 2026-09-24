@@ -6,6 +6,8 @@ export interface DiscordStorageConfig {
   token: string;
   /** Discord channel ID for storage */
   channelId: string;
+  /** Abort downloads that take longer than this many milliseconds (default: 60000) */
+  downloadTimeoutMs?: number;
 }
 
 /**
@@ -133,7 +135,8 @@ export class DiscordStorage {
   ): Promise<UploadResult>;
 
   /**
-   * Download an image from Discord by message ID
+   * Download a file from Discord by message ID. The file is streamed to disk
+   * and only appears at `outputPath` once the download has fully succeeded.
    * @param messageId - Discord message ID containing the image
    * @param outputPath - Path where to save the downloaded file
    * @returns Download result with file info
@@ -149,9 +152,11 @@ export class DiscordStorage {
   getImageUrl(messageId: string): Promise<ImageInfo>;
 
   /**
-   * List recent uploads from the channel
-   * @param limit - Maximum number of messages to fetch (default: 10, max: 100)
-   * @returns Array of image metadata
+   * List recent uploads made by this bot, newest first.
+   * Pages back through the channel history until `limit` uploads are found
+   * or the history runs out. Messages from other users are skipped.
+   * @param limit - Maximum number of uploads to return (default: 10)
+   * @returns Array of upload metadata
    */
   listUploads(limit?: number): Promise<UploadMetadata[]>;
 
