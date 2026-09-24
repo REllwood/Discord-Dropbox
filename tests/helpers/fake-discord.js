@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import { Collection, Events } from 'discord.js';
+import { DiscordStorage } from '../../src/index.js';
 
 let nextId = 1000;
 const snowflake = () => String(nextId++);
@@ -130,4 +131,28 @@ export class FakeClient extends EventEmitter {
     this.destroyed = true;
     this.user = null;
   }
+}
+
+/**
+ * Create a storage instance whose clients are fakes sharing the same channels.
+ * `clientOptions` may be a function of the attempt number (0, 1, ...).
+ */
+export function createTestStorage(t, { clientOptions = {}, channels, config = {} } = {}) {
+  t.mock.method(console, 'log', () => {});
+  t.mock.method(console, 'error', () => {});
+
+  const channel = new FakeChannel('channel-1');
+  const available = channels ?? [channel];
+  const clients = [];
+  const storage = new DiscordStorage({ token: 'token', channelId: 'channel-1', ...config });
+  storage._createClient = () => {
+    const options = typeof clientOptions === 'function'
+      ? clientOptions(clients.length)
+      : clientOptions;
+    const client = new FakeClient({ channels: available, ...options });
+    clients.push(client);
+    return client;
+  };
+
+  return { storage, channel, clients };
 }
