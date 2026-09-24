@@ -409,10 +409,13 @@ export class DiscordStorage {
     try {
       channel = await client.channels.fetch(this.channelId);
     } catch (error) {
-      throw new Error(
+      const wrapped = new Error(
         `Channel ${this.channelId} not found or not accessible (${error.message})`,
         { cause: error },
       );
+      // Keep Discord's error code at the same level as other operation errors
+      wrapped.code = error.code;
+      throw wrapped;
     }
 
     if (!channel) {

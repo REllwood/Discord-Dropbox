@@ -86,7 +86,7 @@ test('an unknown channel gives a clear error that keeps the original cause', asy
     storage.upload(Buffer.from('x'), { filename: 'x.txt' }),
     (error) => {
       assert.match(error.message, /^Upload failed: Channel 999 not found or not accessible/);
-      assert.equal(error.cause.cause.code, 10003);
+      assert.equal(error.cause.code, 10003);
       return true;
     },
   );
