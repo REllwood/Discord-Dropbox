@@ -1,3 +1,17 @@
+import { RateLimiter } from './RateLimiter.js';
+
+export { RateLimiter };
+
+/**
+ * Options for the optional client-side rate limiter
+ */
+export interface RateLimitOptions {
+  /** Requests allowed per window (default: 5) */
+  maxRequests?: number;
+  /** Window length in milliseconds (default: 1000) */
+  windowMs?: number;
+}
+
 /**
  * Configuration options for DiscordStorage
  */
@@ -8,6 +22,12 @@ export interface DiscordStorageConfig {
   channelId: string;
   /** Abort downloads that take longer than this many milliseconds (default: 60000) */
   downloadTimeoutMs?: number;
+  /**
+   * Optional extra throttling of Discord API requests, on top of the rate
+   * limit handling discord.js already does. Pass a RateLimiter to share one
+   * limit between several instances.
+   */
+  rateLimit?: RateLimitOptions | RateLimiter;
 }
 
 /**

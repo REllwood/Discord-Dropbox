@@ -4,6 +4,9 @@ import { readFile, rename, rm } from 'fs/promises';
 import { basename } from 'path';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
+import { RateLimiter } from './RateLimiter.js';
+
+export { RateLimiter };
 
 /** Discord's limit on message content, which holds the description */
 const MAX_DESCRIPTION_LENGTH = 2000;
@@ -35,6 +38,8 @@ export class DiscordStorage {
    * @param {string} config.token - Discord bot token
    * @param {string} config.channelId - Discord channel ID for storage
    * @param {number} [config.downloadTimeoutMs=60000] - Abort downloads that take longer than this
+   * @param {Object|RateLimiter} [config.rateLimit] - Optional extra throttling of Discord API
+   *   requests: `{ maxRequests, windowMs }`, or a RateLimiter to share between instances
    */
   constructor(config) {
     if (!config.token) {
@@ -49,6 +54,14 @@ export class DiscordStorage {
     this.downloadTimeoutMs = config.downloadTimeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS;
     if (!Number.isFinite(this.downloadTimeoutMs) || this.downloadTimeoutMs <= 0) {
       throw new RangeError('downloadTimeoutMs must be a positive number');
+    }
+
+    if (config.rateLimit instanceof RateLimiter) {
+      this.rateLimiter = config.rateLimit;
+    } else if (config.rateLimit) {
+      this.rateLimiter = new RateLimiter(config.rateLimit.maxRequests, config.rateLimit.windowMs);
+    } else {
+      this.rateLimiter = null;
     }
     this.client = null;
     this.isReady = false;
@@ -181,6 +194,7 @@ export class DiscordStorage {
         : await readFile(filePathOrBuffer);
 
       const channel = await this._getChannel();
+      await this._throttle();
       const message = await channel.send({
         content: description,
         files: [new AttachmentBuilder(data, { name: filename })],
@@ -224,6 +238,7 @@ export class DiscordStorage {
 
     try {
       const channel = await this._getChannel();
+      await this._throttle();
       const message = await channel.messages.fetch(messageId);
 
       if (message.attachments.size === 0) {
@@ -256,6 +271,7 @@ export class DiscordStorage {
 
     try {
       const channel = await this._getChannel();
+      await this._throttle();
       const message = await channel.messages.fetch(messageId);
 
       if (message.attachments.size === 0) {
@@ -299,6 +315,7 @@ export class DiscordStorage {
       let before;
 
       while (uploads.length < limit) {
+        await this._throttle();
         const page = await channel.messages.fetch({ limit: 100, before });
         if (page.size === 0) {
           break;
@@ -344,7 +361,9 @@ export class DiscordStorage {
 
     try {
       const channel = await this._getChannel();
+      await this._throttle();
       const message = await channel.messages.fetch(messageId);
+      await this._throttle();
       await message.delete();
 
       return {
@@ -354,6 +373,16 @@ export class DiscordStorage {
       };
     } catch (error) {
       throw new Error(`Delete failed: ${error.message}`, { cause: error });
+    }
+  }
+
+  /**
+   * Wait for the optional rate limiter before a Discord API request
+   * @private
+   */
+  async _throttle() {
+    if (this.rateLimiter) {
+      await this.rateLimiter.waitIfNeeded();
     }
   }
 
