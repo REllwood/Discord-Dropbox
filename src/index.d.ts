@@ -14,7 +14,7 @@ export interface DiscordStorageConfig {
 export interface UploadOptions {
   /** Custom filename (required when uploading from Buffer) */
   filename?: string;
-  /** Optional description/metadata */
+  /** Optional description/metadata, posted as plain text (max 2000 characters) */
   description?: string;
 }
 
@@ -121,7 +121,8 @@ export class DiscordStorage {
   connect(): Promise<void>;
 
   /**
-   * Upload an image to Discord
+   * Upload a file to Discord.
+   * Errors from Discord are wrapped, with the original error kept as `cause`.
    * @param filePathOrBuffer - Path to file or Buffer containing file data
    * @param options - Upload options
    * @returns Upload result with URL and metadata
@@ -140,7 +141,8 @@ export class DiscordStorage {
   download(messageId: string, outputPath: string): Promise<DownloadResult>;
 
   /**
-   * Get URL of an uploaded image by message ID
+   * Get a fresh URL for an uploaded file by message ID.
+   * Discord attachment URLs expire, so call this again rather than storing URLs.
    * @param messageId - Discord message ID containing the image
    * @returns Image information including URL
    */

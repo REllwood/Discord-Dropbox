@@ -2,30 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Client, Events, GatewayIntentBits } from 'discord.js';
 import { DiscordStorage } from '../src/index.js';
-import { FakeChannel, FakeClient } from './helpers/fake-discord.js';
-
-/**
- * Create a storage instance whose clients are fakes sharing one channel.
- * `clientOptions` may be a function of the attempt number (0, 1, ...).
- */
-function setup(t, clientOptions = {}) {
-  t.mock.method(console, 'log', () => {});
-  t.mock.method(console, 'error', () => {});
-
-  const channel = new FakeChannel('channel-1');
-  const clients = [];
-  const storage = new DiscordStorage({ token: 'token', channelId: 'channel-1' });
-  storage._createClient = () => {
-    const options = typeof clientOptions === 'function'
-      ? clientOptions(clients.length)
-      : clientOptions;
-    const client = new FakeClient({ channels: [channel], ...options });
-    clients.push(client);
-    return client;
-  };
-
-  return { storage, channel, clients };
-}
+import { createTestStorage } from './helpers/fake-discord.js';
 
 test('constructor requires a token and channel ID', () => {
   assert.throws(() => new DiscordStorage({ channelId: 'c' }), /token is required/);
@@ -46,7 +23,7 @@ test('the default client is a discord.js Client with the required intents', asyn
 });
 
 test('connect() waits for clientReady', async (t) => {
-  const { storage, clients } = setup(t, { readyDelay: 10 });
+  const { storage, clients } = createTestStorage(t, { clientOptions: { readyDelay: 10 } });
 
   await storage.connect();
 
@@ -55,7 +32,7 @@ test('connect() waits for clientReady', async (t) => {
 });
 
 test('concurrent connect() calls share a single login', async (t) => {
-  const { storage, clients } = setup(t);
+  const { storage, clients } = createTestStorage(t);
 
   await Promise.all([storage.connect(), storage.connect(), storage.connect()]);
 
@@ -64,9 +41,11 @@ test('concurrent connect() calls share a single login', async (t) => {
 });
 
 test('a failed login is not cached, so connect() can retry', async (t) => {
-  const { storage, clients } = setup(t, (attempt) => ({
-    loginError: attempt === 0 ? new Error('An invalid token was provided.') : null,
-  }));
+  const { storage, clients } = createTestStorage(t, {
+    clientOptions: (attempt) => ({
+      loginError: attempt === 0 ? new Error('An invalid token was provided.') : null,
+    }),
+  });
 
   await assert.rejects(storage.connect(), /invalid token/);
   assert.equal(storage.client, null);
@@ -78,7 +57,7 @@ test('a failed login is not cached, so connect() can retry', async (t) => {
 });
 
 test('the instance can reconnect and upload after disconnect()', async (t) => {
-  const { storage, clients } = setup(t);
+  const { storage, clients } = createTestStorage(t);
 
   await storage.connect();
   await storage.disconnect();
@@ -93,7 +72,7 @@ test('the instance can reconnect and upload after disconnect()', async (t) => {
 });
 
 test('disconnect() while connecting rejects the pending connect()', async (t) => {
-  const { storage, clients } = setup(t, { readyDelay: 50 });
+  const { storage, clients } = createTestStorage(t, { clientOptions: { readyDelay: 50 } });
 
   const pending = storage.connect();
   await storage.disconnect();
@@ -107,7 +86,7 @@ test('disconnect() while connecting rejects the pending connect()', async (t) =>
 });
 
 test('client errors after login are logged instead of crashing', async (t) => {
-  const { storage, clients } = setup(t);
+  const { storage, clients } = createTestStorage(t);
   await storage.connect();
 
   assert.doesNotThrow(() => {
@@ -118,7 +97,7 @@ test('client errors after login are logged instead of crashing', async (t) => {
 });
 
 test('disconnect() without a connection is a no-op', async (t) => {
-  const { storage, clients } = setup(t);
+  const { storage, clients } = createTestStorage(t);
 
   await storage.disconnect();
 

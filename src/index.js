@@ -1,8 +1,26 @@
 import { Client, Events, GatewayIntentBits, AttachmentBuilder } from 'discord.js';
-import { createReadStream, writeFileSync } from 'fs';
+import { writeFileSync } from 'fs';
+import { readFile } from 'fs/promises';
 import { basename } from 'path';
 import https from 'https';
 import http from 'http';
+
+/** Discord's limit on message content, which holds the description */
+const MAX_DESCRIPTION_LENGTH = 2000;
+
+/** Discord API error code for a file over the server's upload limit */
+const FILE_TOO_LARGE = 40005;
+
+/**
+ * Throw unless messageId looks like a Discord snowflake.
+ * discord.js treats a missing ID as "fetch many", which would otherwise
+ * make delete(undefined) report success without deleting anything.
+ */
+function assertMessageId(messageId) {
+  if (typeof messageId !== 'string' || !/^\d+$/.test(messageId)) {
+    throw new TypeError('messageId must be a Discord message ID string');
+  }
+}
 
 /**
  * DiscordStorage - Educational Discord-based image storage library
@@ -123,45 +141,50 @@ export class DiscordStorage {
   }
 
   /**
-   * Upload an image to Discord
+   * Upload a file to Discord
    * @param {string|Buffer} filePathOrBuffer - Path to file or Buffer containing file data
    * @param {Object} options - Upload options
    * @param {string} options.filename - Custom filename (required if using Buffer)
-   * @param {string} options.description - Optional description/metadata
+   * @param {string} options.description - Optional description/metadata (max 2000 characters)
    * @returns {Promise<Object>} Upload result with URL and metadata
    */
   async upload(filePathOrBuffer, options = {}) {
-    await this.connect();
-
-    const channel = await this.client.channels.fetch(this.channelId);
-    if (!channel) {
-      throw new Error(`Channel ${this.channelId} not found`);
-    }
-
-    let attachment;
     let filename;
-
     if (Buffer.isBuffer(filePathOrBuffer)) {
       if (!options.filename) {
         throw new Error('Filename is required when uploading from Buffer');
       }
       filename = options.filename;
-      attachment = new AttachmentBuilder(filePathOrBuffer, { name: filename });
-    } else {
+    } else if (typeof filePathOrBuffer === 'string' && filePathOrBuffer !== '') {
       filename = options.filename || basename(filePathOrBuffer);
-      attachment = new AttachmentBuilder(filePathOrBuffer, { name: filename });
+    } else {
+      throw new TypeError('Expected a file path or a Buffer');
     }
 
     const description = options.description || `Uploaded: ${filename}`;
-    
+    if (description.length > MAX_DESCRIPTION_LENGTH) {
+      throw new Error(`Description must be ${MAX_DESCRIPTION_LENGTH} characters or fewer`);
+    }
+
     try {
+      // Read local files up front so a bad path fails before connecting
+      const data = Buffer.isBuffer(filePathOrBuffer)
+        ? filePathOrBuffer
+        : await readFile(filePathOrBuffer);
+
+      const channel = await this._getChannel();
       const message = await channel.send({
         content: description,
-        files: [attachment],
+        files: [new AttachmentBuilder(data, { name: filename })],
+        // The description is plain text, so never let it ping anyone
+        allowedMentions: { parse: [] },
       });
 
       const uploadedAttachment = message.attachments.first();
-      
+      if (!uploadedAttachment) {
+        throw new Error('Discord did not return the uploaded attachment');
+      }
+
       return {
         success: true,
         url: uploadedAttachment.url,
@@ -172,34 +195,36 @@ export class DiscordStorage {
         uploadedAt: message.createdAt,
       };
     } catch (error) {
-      throw new Error(`Upload failed: ${error.message}`);
+      if (error.code === FILE_TOO_LARGE) {
+        throw new Error(`Upload failed: file is larger than this server's upload limit`, { cause: error });
+      }
+      throw new Error(`Upload failed: ${error.message}`, { cause: error });
     }
   }
 
   /**
-   * Download an image from Discord by message ID
-   * @param {string} messageId - Discord message ID containing the image
+   * Download a file from Discord by message ID
+   * @param {string} messageId - Discord message ID containing the file
    * @param {string} outputPath - Path where to save the downloaded file
    * @returns {Promise<Object>} Download result with file info
    */
   async download(messageId, outputPath) {
-    await this.connect();
-
-    const channel = await this.client.channels.fetch(this.channelId);
-    if (!channel) {
-      throw new Error(`Channel ${this.channelId} not found`);
+    assertMessageId(messageId);
+    if (typeof outputPath !== 'string' || outputPath === '') {
+      throw new TypeError('outputPath must be a file path');
     }
 
     try {
+      const channel = await this._getChannel();
       const message = await channel.messages.fetch(messageId);
-      
+
       if (message.attachments.size === 0) {
         throw new Error('No attachments found in message');
       }
 
       const attachment = message.attachments.first();
       const fileData = await this._downloadFile(attachment.url);
-      
+
       writeFileSync(outputPath, fileData);
 
       return {
@@ -210,26 +235,23 @@ export class DiscordStorage {
         downloadedAt: new Date(),
       };
     } catch (error) {
-      throw new Error(`Download failed: ${error.message}`);
+      throw new Error(`Download failed: ${error.message}`, { cause: error });
     }
   }
 
   /**
-   * Get URL of an uploaded image by message ID
-   * @param {string} messageId - Discord message ID containing the image
-   * @returns {Promise<Object>} Image information including URL
+   * Get a fresh URL for an uploaded file by message ID.
+   * Discord attachment URLs expire, so call this again rather than storing URLs.
+   * @param {string} messageId - Discord message ID containing the file
+   * @returns {Promise<Object>} File information including URL
    */
   async getImageUrl(messageId) {
-    await this.connect();
-
-    const channel = await this.client.channels.fetch(this.channelId);
-    if (!channel) {
-      throw new Error(`Channel ${this.channelId} not found`);
-    }
+    assertMessageId(messageId);
 
     try {
+      const channel = await this._getChannel();
       const message = await channel.messages.fetch(messageId);
-      
+
       if (message.attachments.size === 0) {
         throw new Error('No attachments found in message');
       }
@@ -244,7 +266,7 @@ export class DiscordStorage {
         uploadedAt: message.createdAt,
       };
     } catch (error) {
-      throw new Error(`Failed to get image URL: ${error.message}`);
+      throw new Error(`Failed to get image URL: ${error.message}`, { cause: error });
     }
   }
 
@@ -254,16 +276,10 @@ export class DiscordStorage {
    * @returns {Promise<Array>} Array of image metadata
    */
   async listUploads(limit = 10) {
-    await this.connect();
-
-    const channel = await this.client.channels.fetch(this.channelId);
-    if (!channel) {
-      throw new Error(`Channel ${this.channelId} not found`);
-    }
-
     try {
+      const channel = await this._getChannel();
       const messages = await channel.messages.fetch({ limit: Math.min(limit, 100) });
-      
+
       const uploads = [];
       messages.forEach((message) => {
         if (message.attachments.size > 0) {
@@ -281,24 +297,20 @@ export class DiscordStorage {
 
       return uploads;
     } catch (error) {
-      throw new Error(`Failed to list uploads: ${error.message}`);
+      throw new Error(`Failed to list uploads: ${error.message}`, { cause: error });
     }
   }
 
   /**
-   * Delete an uploaded image by message ID
+   * Delete an uploaded file by message ID
    * @param {string} messageId - Discord message ID to delete
    * @returns {Promise<Object>} Deletion result
    */
   async delete(messageId) {
-    await this.connect();
-
-    const channel = await this.client.channels.fetch(this.channelId);
-    if (!channel) {
-      throw new Error(`Channel ${this.channelId} not found`);
-    }
+    assertMessageId(messageId);
 
     try {
+      const channel = await this._getChannel();
       const message = await channel.messages.fetch(messageId);
       await message.delete();
 
@@ -308,8 +320,40 @@ export class DiscordStorage {
         deletedAt: new Date(),
       };
     } catch (error) {
-      throw new Error(`Delete failed: ${error.message}`);
+      throw new Error(`Delete failed: ${error.message}`, { cause: error });
     }
+  }
+
+  /**
+   * Connect if needed and fetch the storage channel
+   * @private
+   */
+  async _getChannel() {
+    await this.connect();
+
+    const client = this.client;
+    if (!client) {
+      throw new Error('Disconnected from Discord');
+    }
+
+    let channel;
+    try {
+      channel = await client.channels.fetch(this.channelId);
+    } catch (error) {
+      throw new Error(
+        `Channel ${this.channelId} not found or not accessible (${error.message})`,
+        { cause: error },
+      );
+    }
+
+    if (!channel) {
+      throw new Error(`Channel ${this.channelId} not found`);
+    }
+    if (!channel.isTextBased()) {
+      throw new Error(`Channel ${this.channelId} is not a text channel`);
+    }
+
+    return channel;
   }
 
   /**
