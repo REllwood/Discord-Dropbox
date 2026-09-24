@@ -57,15 +57,26 @@ test('the constructor rejects invalid settings', () => {
 });
 
 test('the rateLimit option throttles storage operations', async (t) => {
-  const { storage } = createTestStorage(t, { config: { rateLimit: { maxRequests: 1, windowMs: 60 } } });
-  t.mock.method(storage.rateLimiter, '_sleep', storage.rateLimiter._sleep);
+  const { storage, channel } = createTestStorage(t, {
+    config: { rateLimit: { maxRequests: 1, windowMs: 60 } },
+  });
+  const sendTimes = [];
+  const send = channel.send.bind(channel);
+  t.mock.method(channel, 'send', (options) => {
+    sendTimes.push(Date.now());
+    return send(options);
+  });
 
-  const start = Date.now();
   await Promise.all([1, 2, 3].map((i) =>
     storage.upload(Buffer.from('x'), { filename: `${i}.txt` })));
 
-  assert.ok(Date.now() - start >= 120 - JITTER_MS);
-  assert.equal(storage.rateLimiter._sleep.mock.callCount(), 2);
+  assert.equal(sendTimes.length, 3);
+  for (let i = 1; i < sendTimes.length; i += 1) {
+    assert.ok(
+      sendTimes[i] - sendTimes[i - 1] >= 60 - JITTER_MS,
+      `sends ${i - 1} and ${i} were only ${sendTimes[i] - sendTimes[i - 1]}ms apart`,
+    );
+  }
 });
 
 test('a RateLimiter instance can be shared between storages', async (t) => {
