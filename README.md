@@ -143,7 +143,7 @@ const storage = new DiscordStorage({
 
 ### How files are stored
 
-Each file is one Discord message with one attachment. **The message ID is the file's permanent handle.** Attachment URLs are signed by Discord and expire after a while (currently around 24 hours), so store message IDs and call `getImageUrl()` when you need a fresh URL.
+Each file is one Discord message with one attachment. **The message ID is the file's permanent handle.** Attachment URLs are signed by Discord and expire after a while (currently around 24 hours), so store message IDs and call `getImageUrl()` when you need a fresh URL. `getImageUrl()` and `download()` always ask Discord for the message rather than using discord.js's cache, so they never hand back a URL that has already expired.
 
 ### Methods
 

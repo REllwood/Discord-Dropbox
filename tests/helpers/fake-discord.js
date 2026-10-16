@@ -18,7 +18,12 @@ export function apiError(code, message, status = 404) {
 }
 
 /**
- * In-memory stand-in for a discord.js text channel
+ * In-memory stand-in for a discord.js text channel.
+ *
+ * `store` is what Discord holds. Like discord.js, the channel also keeps a
+ * client-side `messages.cache` of the Message objects it has handed out, and
+ * those keep the attachment URLs they were created with. Every API request
+ * is recorded in `requests`.
  */
 export class FakeChannel {
   constructor(id = 'channel-1', { botUser = { id: 'bot-user', tag: 'StorageBot#0001' } } = {}) {
@@ -26,8 +31,12 @@ export class FakeChannel {
     this.botUser = botUser;
     this.store = new Map();
     this.sent = [];
+    this.requests = [];
+    this._signature = 1;
     this.messages = {
-      fetch: async (idOrOptions) => this._fetch(idOrOptions),
+      cache: new Map(),
+      fetch: async (options) => this._fetch(options),
+      delete: async (messageId) => this._delete(messageId),
     };
   }
 
@@ -37,57 +46,121 @@ export class FakeChannel {
 
   async send(options) {
     this.sent.push(options);
+    this.requests.push('POST message');
+    const message = await this.post(this.botUser, options);
+    return this._toClient(message);
+  }
+
+  /**
+   * Post a message with files as `author`, as if from another Discord client
+   */
+  async post(author, { content = '', files = [] } = {}) {
     const attachments = new Collection();
-    for (const file of options.files ?? []) {
+    for (const file of files) {
       const data = Buffer.isBuffer(file.attachment)
         ? file.attachment
         : await readFile(file.attachment);
       const id = snowflake();
-      attachments.set(id, {
-        id,
-        name: file.name,
-        size: data.length,
-        url: `https://cdn.discordapp.com/attachments/${this.id}/${id}/${file.name}?ex=1&is=1&hm=1`,
-        data,
-      });
+      attachments.set(id, { id, name: file.name, size: data.length, data });
     }
-    return this.addMessage({ author: this.botUser, content: options.content, attachments });
+    return this.addMessage({ author, content, attachments });
   }
 
   /**
    * Add a message to the channel, as if it had been posted by `author`
    */
   addMessage({ author, content = '', attachments = new Collection() }) {
-    const message = {
-      id: snowflake(),
-      author,
-      content,
-      attachments,
-      createdAt: new Date(),
-      delete: async () => {
-        this.store.delete(message.id);
-        return message;
-      },
-    };
+    const message = { id: snowflake(), author, content, attachments, createdAt: new Date() };
     this.store.set(message.id, message);
     return message;
   }
 
-  async _fetch(idOrOptions) {
-    if (typeof idOrOptions === 'string') {
-      const message = this.store.get(idOrOptions);
-      if (!message) {
+  /**
+   * Re-sign every attachment URL, as happens when Discord's signed URLs expire.
+   * URLs handed out before this call stop working.
+   */
+  expireUrls() {
+    this._signature += 1;
+  }
+
+  /**
+   * The data behind an attachment URL, if that URL is currently valid
+   */
+  cdnLookup(url) {
+    for (const message of this.store.values()) {
+      for (const attachment of message.attachments.values()) {
+        if (this._url(attachment) === url) {
+          return attachment.data;
+        }
+      }
+    }
+    return null;
+  }
+
+  _url(attachment) {
+    return `https://cdn.discordapp.com/attachments/${this.id}/${attachment.id}/${attachment.name}?ex=${this._signature}`;
+  }
+
+  /**
+   * Build the Message discord.js would create from an API response, and cache it
+   */
+  _toClient(stored) {
+    const attachments = new Collection();
+    for (const [id, { data, ...attachment }] of stored.attachments) {
+      attachments.set(id, { ...attachment, url: this._url(attachment) });
+    }
+    const message = {
+      id: stored.id,
+      author: stored.author,
+      content: stored.content,
+      createdAt: stored.createdAt,
+      attachments,
+      delete: async () => {
+        await this._delete(stored.id);
+        return message;
+      },
+    };
+    this.messages.cache.set(message.id, message);
+    return message;
+  }
+
+  /**
+   * Mirrors MessageManager.fetch(): a single message comes from the cache
+   * unless `force` is set; a page of messages always comes from the API.
+   */
+  async _fetch(options) {
+    const single = typeof options === 'string' ? { message: options } : options ?? {};
+
+    if (single.message) {
+      if (!single.force && this.messages.cache.has(single.message)) {
+        return this.messages.cache.get(single.message);
+      }
+      this.requests.push(`GET message ${single.message}`);
+      const stored = this.store.get(single.message);
+      if (!stored) {
         throw apiError(10008, 'Unknown Message');
       }
-      return message;
+      return this._toClient(stored);
     }
 
-    const { limit = 50, before } = idOrOptions ?? {};
+    this.requests.push('GET messages');
+    const { limit = 50, before } = single;
     // Newest first, like the Discord API
     const ordered = [...this.store.values()].sort((a, b) => Number(b.id) - Number(a.id));
     const start = before ? ordered.findIndex((m) => Number(m.id) < Number(before)) : 0;
     const page = start === -1 ? [] : ordered.slice(start, start + limit);
-    return new Collection(page.map((m) => [m.id, m]));
+    return new Collection(page.map((m) => [m.id, this._toClient(m)]));
+  }
+
+  /**
+   * Mirrors MessageManager.delete(): one API request. The cache is left alone,
+   * because discord.js only evicts deleted messages on a gateway event.
+   */
+  async _delete(messageId) {
+    this.requests.push(`DELETE message ${messageId}`);
+    if (!this.store.delete(messageId)) {
+      throw apiError(10008, 'Unknown Message');
+    }
   }
 }
 
@@ -158,17 +231,12 @@ export function createTestStorage(t, { clientOptions = {}, channels, config = {}
 }
 
 /**
- * Serve a fake channel's attachments through a mocked global fetch
+ * Serve a fake channel's attachments through a mocked global fetch.
+ * Expired URLs get a 404, as they do from Discord's CDN.
  */
 export function mockCdn(t, channel) {
   return t.mock.method(globalThis, 'fetch', async (url) => {
-    for (const message of channel.store.values()) {
-      for (const attachment of message.attachments.values()) {
-        if (attachment.url === url) {
-          return new Response(attachment.data);
-        }
-      }
-    }
-    return new Response('Not Found', { status: 404 });
+    const data = channel.cdnLookup(url);
+    return data ? new Response(data) : new Response('This content is no longer available.', { status: 404 });
   });
 }

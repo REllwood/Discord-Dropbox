@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Client, Events, GatewayIntentBits } from 'discord.js';
+import { Client, Events } from 'discord.js';
 import { DiscordStorage } from '../src/index.js';
 import { createTestStorage } from './helpers/fake-discord.js';
 
@@ -9,14 +9,14 @@ test('constructor requires a token and channel ID', () => {
   assert.throws(() => new DiscordStorage({ token: 't' }), /channel ID is required/);
 });
 
-test('the default client is a discord.js Client with the required intents', async () => {
+test('the default client is a discord.js Client with only the Guilds intent', async () => {
   const storage = new DiscordStorage({ token: 'token', channelId: 'channel-1' });
   const client = storage._createClient();
 
   try {
     assert.ok(client instanceof Client);
-    assert.ok(client.options.intents.has(GatewayIntentBits.Guilds));
-    assert.ok(client.options.intents.has(GatewayIntentBits.GuildMessages));
+    // Everything else is a REST call, so no other gateway events are needed
+    assert.deepEqual(client.options.intents.toArray(), ['Guilds']);
   } finally {
     await client.destroy();
   }
