@@ -79,6 +79,18 @@ test('upload() explains when a file is over the server upload limit', async (t) 
   );
 });
 
+test('upload() also explains a bare HTTP 413 that has no Discord error code', async (t) => {
+  const { storage, channel } = createTestStorage(t);
+  t.mock.method(channel, 'send', async () => {
+    throw apiError(undefined, 'Request Entity Too Large', 413);
+  });
+
+  await assert.rejects(
+    storage.upload(Buffer.from('x'), { filename: 'big.bin' }),
+    /larger than this server's upload limit/,
+  );
+});
+
 test('an unknown channel gives a clear error that keeps the original cause', async (t) => {
   const { storage } = createTestStorage(t, { config: { channelId: '999' } });
 
@@ -111,6 +123,17 @@ test('getImageUrl() returns the current details of an upload', async (t) => {
   assert.equal(info.description, 'desc');
 });
 
+test('getImageUrl() returns a freshly signed URL once the upload URL has expired', async (t) => {
+  const { storage, channel } = createTestStorage(t);
+  const upload = await storage.upload(Buffer.from('abc'), { filename: 'a.txt' });
+
+  channel.expireUrls();
+  const info = await storage.getImageUrl(upload.messageId);
+
+  assert.notEqual(info.url, upload.url);
+  assert.deepEqual(channel.cdnLookup(info.url), Buffer.from('abc'));
+});
+
 test('getImageUrl() rejects messages without attachments', async (t) => {
   const { storage, channel } = createTestStorage(t);
   const message = channel.addMessage({ author: channel.botUser, content: 'just text' });
@@ -122,11 +145,26 @@ test('delete() removes the message', async (t) => {
   const { storage, channel } = createTestStorage(t);
   const upload = await storage.upload(Buffer.from('abc'), { filename: 'a.txt' });
 
+  // As if the file had been uploaded by an earlier run
+  channel.messages.cache.clear();
+  channel.requests.length = 0;
+
   const result = await storage.delete(upload.messageId);
 
   assert.equal(result.success, true);
   assert.equal(channel.store.has(upload.messageId), false);
+  assert.deepEqual(channel.requests, [`DELETE message ${upload.messageId}`]);
   await assert.rejects(storage.delete(upload.messageId), /Delete failed: Unknown Message/);
+});
+
+test('a deleted upload is not served from the discord.js cache', async (t) => {
+  const { storage } = createTestStorage(t);
+  const upload = await storage.upload(Buffer.from('abc'), { filename: 'a.txt' });
+
+  await storage.delete(upload.messageId);
+
+  await assert.rejects(storage.getImageUrl(upload.messageId), /Unknown Message/);
+  await assert.rejects(storage.download(upload.messageId, 'out.txt'), /Unknown Message/);
 });
 
 test('message IDs are validated so delete(undefined) cannot report success', async (t) => {

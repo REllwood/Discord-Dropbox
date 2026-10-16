@@ -12,8 +12,8 @@ async function tempDir(t) {
   return dir;
 }
 
-function sendFile(channel, name, content = name) {
-  return channel.send({ content: `Uploaded: ${name}`, files: [{ attachment: Buffer.from(content), name }] });
+function sendFile(channel, name, author = channel.botUser) {
+  return channel.post(author, { content: `Uploaded: ${name}`, files: [{ attachment: Buffer.from(name), name }] });
 }
 
 test('download() saves the attachment to disk', async (t) => {
@@ -30,6 +30,19 @@ test('download() saves the attachment to disk', async (t) => {
   assert.equal(result.savedTo, outputPath);
   assert.equal(await readFile(outputPath, 'utf8'), 'file contents');
   assert.deepEqual(await readdir(dir), ['notes.txt']);
+});
+
+test('download() still works once the upload URL has expired', async (t) => {
+  const { storage, channel } = createTestStorage(t);
+  mockCdn(t, channel);
+  const dir = await tempDir(t);
+  const upload = await storage.upload(Buffer.from('file contents'), { filename: 'notes.txt' });
+  const outputPath = join(dir, 'notes.txt');
+
+  channel.expireUrls();
+  await storage.download(upload.messageId, outputPath);
+
+  assert.equal(await readFile(outputPath, 'utf8'), 'file contents');
 });
 
 test('download() reports HTTP errors and writes nothing', async (t) => {
@@ -106,8 +119,7 @@ test('listUploads() counts uploads, not messages', async (t) => {
 test('listUploads() skips files posted by other users', async (t) => {
   const { storage, channel } = createTestStorage(t);
   await sendFile(channel, 'mine.txt');
-  const theirs = await sendFile(channel, 'theirs.txt');
-  theirs.author = { id: 'someone-else' };
+  await sendFile(channel, 'theirs.txt', { id: 'someone-else' });
 
   const uploads = await storage.listUploads();
 
@@ -128,13 +140,26 @@ test('listUploads() pages back past 100 messages, newest first', async (t) => {
   assert.equal(new Set(uploads.map((u) => u.messageId)).size, 120);
 });
 
-test('listUploads() stops when the history runs out', async (t) => {
+test('listUploads() stops when the history runs out, without asking for another page', async (t) => {
   const { storage, channel } = createTestStorage(t);
   await sendFile(channel, 'only.txt');
 
   const uploads = await storage.listUploads(50);
 
   assert.equal(uploads.length, 1);
+  assert.deepEqual(channel.requests, ['GET messages']);
+});
+
+test('listUploads() handles a history that exactly fills a page', async (t) => {
+  const { storage, channel } = createTestStorage(t);
+  for (let i = 0; i < 100; i += 1) {
+    await sendFile(channel, `file-${i}.txt`);
+  }
+
+  const uploads = await storage.listUploads(150);
+
+  assert.equal(uploads.length, 100);
+  assert.deepEqual(channel.requests, ['GET messages', 'GET messages']);
 });
 
 test('listUploads() rejects an invalid limit', async (t) => {

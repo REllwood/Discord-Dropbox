@@ -11,8 +11,16 @@ export { RateLimiter };
 /** Discord's limit on message content, which holds the description */
 const MAX_DESCRIPTION_LENGTH = 2000;
 
-/** Discord API error code for a file over the server's upload limit */
+/**
+ * Discord API error code for a file over the server's upload limit. Very
+ * large requests can be turned away before they reach the API, as a bare
+ * HTTP 413 with no code.
+ */
 const FILE_TOO_LARGE = 40005;
+const HTTP_PAYLOAD_TOO_LARGE = 413;
+
+/** The most messages Discord returns per page of channel history */
+const HISTORY_PAGE_SIZE = 100;
 
 /** Default time allowed for a whole download before it is aborted */
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 60_000;
@@ -105,11 +113,10 @@ export class DiscordStorage {
    * @private
    */
   _createClient() {
+    // Guilds keeps the channel cache up to date. Everything else is a REST
+    // call, so subscribing to message events would only add gateway traffic
     return new Client({
-      intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-      ],
+      intents: [GatewayIntentBits.Guilds],
     });
   }
 
@@ -224,7 +231,7 @@ export class DiscordStorage {
         uploadedAt: message.createdAt,
       };
     } catch (error) {
-      if (error.code === FILE_TOO_LARGE) {
+      if (error.code === FILE_TOO_LARGE || error.status === HTTP_PAYLOAD_TOO_LARGE) {
         throw new Error(`Upload failed: file is larger than this server's upload limit`, { cause: error });
       }
       throw new Error(`Upload failed: ${error.message}`, { cause: error });
@@ -244,15 +251,7 @@ export class DiscordStorage {
     }
 
     try {
-      const channel = await this._getChannel();
-      await this._throttle();
-      const message = await channel.messages.fetch(messageId);
-
-      if (message.attachments.size === 0) {
-        throw new Error('No attachments found in message');
-      }
-
-      const attachment = message.attachments.first();
+      const { attachment } = await this._fetchUpload(messageId);
       await this._downloadFile(attachment.url, outputPath);
 
       return {
@@ -277,15 +276,7 @@ export class DiscordStorage {
     assertMessageId(messageId);
 
     try {
-      const channel = await this._getChannel();
-      await this._throttle();
-      const message = await channel.messages.fetch(messageId);
-
-      if (message.attachments.size === 0) {
-        throw new Error('No attachments found in message');
-      }
-
-      const attachment = message.attachments.first();
+      const { message, attachment } = await this._fetchUpload(messageId);
 
       return {
         url: attachment.url,
@@ -323,10 +314,7 @@ export class DiscordStorage {
 
       while (uploads.length < limit) {
         await this._throttle();
-        const page = await channel.messages.fetch({ limit: 100, before });
-        if (page.size === 0) {
-          break;
-        }
+        const page = await channel.messages.fetch({ limit: HISTORY_PAGE_SIZE, before });
 
         for (const message of page.values()) {
           if (message.author.id !== botId || message.attachments.size === 0) {
@@ -348,6 +336,10 @@ export class DiscordStorage {
           }
         }
 
+        // A short page means there is no older history to ask for
+        if (page.size < HISTORY_PAGE_SIZE) {
+          break;
+        }
         // Pages come newest first, so the last key is the oldest message
         before = page.lastKey();
       }
@@ -369,9 +361,8 @@ export class DiscordStorage {
     try {
       const channel = await this._getChannel();
       await this._throttle();
-      const message = await channel.messages.fetch(messageId);
-      await this._throttle();
-      await message.delete();
+      // Deletes by ID, so there is no need to fetch the message first
+      await channel.messages.delete(messageId);
 
       return {
         success: true,
@@ -426,6 +417,26 @@ export class DiscordStorage {
     }
 
     return channel;
+  }
+
+  /**
+   * Fetch an upload's message and attachment straight from Discord.
+   * discord.js caches every message the bot sends or fetches, and a cached
+   * message keeps the attachment URL it had at the time. Those URLs expire,
+   * and the cache also misses deletions, so always bypass it.
+   * @private
+   */
+  async _fetchUpload(messageId) {
+    const channel = await this._getChannel();
+    await this._throttle();
+    const message = await channel.messages.fetch({ message: messageId, force: true });
+
+    const attachment = message.attachments.first();
+    if (!attachment) {
+      throw new Error('No attachments found in message');
+    }
+
+    return { message, attachment };
   }
 
   /**
